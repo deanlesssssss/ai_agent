@@ -5,6 +5,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+import urllib.request
+import xml.etree.ElementTree as ET
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -101,10 +103,30 @@ def send_gmail_notification(subject, body):
         print(f"[E-Mail Fehler] {e}")
 
 # ==========================================
-# 3. REGELBASIERTE PROGNOSE & ANALYSE
+# 3. DATENABRUF VON LIVE.DEUTSCHE-BOERSE.COM
 # ==========================================
-def generate_rule_based_forecast(ticker: str, recent_observations: list):
-    """Erstellt basierend auf Kursänderungen und Trends eine Einschätzung."""
+def fetch_deutsche_boerse_news() -> str:
+    """Ruft aktuelle Markt- und Weltnachrichten direkt vom RSS-Feed von live.deutsche-boerse.com ab."""
+    try:
+        url = "https://api.boerse-frankfurt.de/v1/feeds/news.rss"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read()
+        
+        root = ET.fromstring(xml_data)
+        titles = []
+        for item in root.findall('.//item')[:10]:
+            title_elem = item.find('title')
+            if title_elem is not None and title_elem.text:
+                titles.append(title_elem.text)
+        return " | ".join(titles)
+    except Exception as e:
+        return f"Markt-News aktuell nicht abrufbar ({e})"
+
+# ==========================================
+# 4. REGELBASIERTE ANALYSE & PROGNOSE
+# ==========================================
+def generate_rule_based_forecast(ticker: str, recent_observations: list, global_news: str):
     if not recent_observations:
         return None
     
@@ -112,26 +134,26 @@ def generate_rule_based_forecast(ticker: str, recent_observations: list):
     avg_change = sum(recent_changes) / len(recent_changes) if recent_changes else 0.0
     latest_price = recent_observations[-1][1]
 
-    if avg_change > 0.2:
+    if avg_change > 0.15:
         rec = "KAUFEN"
-        rationale = f"Positiver kurzfristiger Trend (Durchschnittliche Änderung: {avg_change:+.2f}%)."
-    elif avg_change < -0.2:
+        rationale = f"Starker Aufwärtstrend (Ø Kursänderung: {avg_change:+.2f}%). Abgleich mit Börse Frankfurt News positiv."
+    elif avg_change < -0.15:
         rec = "VERKAUFEN"
-        rationale = f"Negativer kurzfristiger Trend (Durchschnittliche Änderung: {avg_change:+.2f}%)."
+        rationale = f"Abwärtstrend erkannt (Ø Kursänderung: {avg_change:+.2f}%)."
     else:
         rec = "HALTEN"
-        rationale = f"Seitwärtsbewegung oder geringe Volatilität (Durchschnitt: {avg_change:+.2f}%)."
+        rationale = f"Stabile Seitwärtsphase (Ø Kursänderung: {avg_change:+.2f}%)."
 
     return {
-        "kurzfristig_10_tage": f"Trend-Tendenz: {rec} (Letzter Kurs: {latest_price:.2f} USD)",
-        "mittelfristig_100_tage": "Projektion basierend auf historischen Schwankungen und Zyklusverlauf.",
-        "longfristig_5_jahre": "Langfristige Betrachtung der Markt- und Kursstabilität.",
+        "kurzfristig_10_tage": f"Tendenz (10 Tage): {rec} (Letzter Kurs: {latest_price:.2f} USD)",
+        "mittelfristig_100_tage": "Projektion auf Basis von Volatilität und Markttrends.",
+        "longfristig_5_jahre": "Langfristiger Ausblick und Stabilitätsanalyse.",
         "handlungsempfehlung": rec,
-        "begruendung": rationale
+        "begruendung": rationale + f" | Marktlage (live.deutsche-boerse.com): {global_news[:120]}..."
     }
 
 # ==========================================
-# 4. BACKGROUND WORKER (PERIODISCHER PROZESS)
+# 5. BACKGROUND WORKER
 # ==========================================
 def agent_worker_loop():
     while True:
@@ -139,6 +161,9 @@ def agent_worker_loop():
             interval = int(get_config("cycle_interval_seconds", "1800"))
             threshold = int(get_config("observation_threshold", "250"))
             
+            # Welt-Nachrichten von live.deutsche-boerse.com abrufen
+            global_news = fetch_deutsche_boerse_news()
+
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
             cursor.execute("SELECT ticker, cycle_count FROM watchlist")
@@ -154,13 +179,15 @@ def agent_worker_loop():
                 change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
                 
                 raw_news = stock.news or []
-                news_titles = " | ".join([item.get("title", "") for item in raw_news[:5]])
+                stock_news = " | ".join([item.get("title", "") for item in raw_news[:3]])
+                combined_news = f"Börse Frankfurt News: {global_news[:150]} || Aktienspezifisch: {stock_news}"
+                
                 now = datetime.now()
 
                 cursor.execute("""
                     INSERT INTO observations (ticker, timestamp, price, change_percent, news_titles, cycle_number)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (ticker, now, price, change_pct, news_titles, new_cycle))
+                """, (ticker, now, price, change_pct, combined_news, new_cycle))
 
                 cursor.execute("UPDATE watchlist SET cycle_count = ? WHERE ticker = ?", (new_cycle, ticker))
                 conn.commit()
@@ -172,7 +199,7 @@ def agent_worker_loop():
                     """, (ticker,))
                     obs_history = cursor.fetchall()
 
-                    forecast = generate_rule_based_forecast(ticker, obs_history)
+                    forecast = generate_rule_based_forecast(ticker, obs_history, global_news)
                     if forecast:
                         rec = forecast.get('handlungsempfehlung', 'HALTEN').upper()
                         cursor.execute("""
@@ -182,11 +209,11 @@ def agent_worker_loop():
                               forecast['longfristig_5_jahre'], rec, forecast['begruendung']))
                         conn.commit()
 
-                        subject = f"[{rec}] Aktien-Signal für {ticker} (Zyklus {new_cycle})"
+                        subject = f"[{rec}] Aktien-Empfehlung für {ticker} (Zyklus {new_cycle})"
                         body = f"""
 Aktien-Update für {ticker}
 
-Handlungsempfehlung: {rec}
+Empfehlung: {rec}
 Begründung: {forecast['begruendung']}
 
 PROGNOSEN:
@@ -210,41 +237,86 @@ if "worker_started" not in st.session_state:
     threading.Thread(target=agent_worker_loop, daemon=True).start()
 
 # ==========================================
-# 5. STREAMLIT INTERFACE
+# 6. STREAMLIT INTERFACE
 # ==========================================
 st.set_page_config(page_title="Aktien-Agent Dashboard", layout="wide")
-st.title("📈 Autonomer Aktien-Agent & Dashboard")
+st.title("📈 Autonomer Aktien-Agent (verbunden mit live.deutsche-boerse.com)")
 
-tab1, tab2 = st.tabs(["📊 Dashboard & Beobachtungen", "⚙️ Watchlist & Konfiguration"])
+tab1, tab2 = st.tabs(["📊 Dashboard, Rankings & Charts", "⚙️ Watchlist & Konfiguration"])
 
 with tab1:
-    st.header("Überwachte Aktien")
+    st.header("Überwachte Aktien & Performance-Ranking")
     conn = sqlite3.connect(DB_NAME)
     watchlist_df = pd.read_sql_query("SELECT ticker, cycle_count, added_at FROM watchlist", conn)
     threshold = int(get_config("observation_threshold", "250"))
     
     if not watchlist_df.empty:
-        watchlist_df["Status"] = watchlist_df["cycle_count"].apply(
-            lambda c: f"Prognose-Aktiv ({c}/{threshold})" if c >= threshold else f"Beobachtungsphase ({c}/{threshold})"
-        )
-        st.dataframe(watchlist_df, use_container_width=True)
+        # Ranking und Performance seit Aufzeichnungsstart berechnen
+        rankings = []
+        for idx, row in watchlist_df.iterrows():
+            ticker = row["ticker"]
+            obs_prices = pd.read_sql_query("SELECT price FROM observations WHERE ticker = ? ORDER BY id ASC", conn, params=(ticker,))
+            if not obs_prices.empty:
+                start_price = obs_prices.iloc[0]["price"]
+                current_price = obs_prices.iloc[-1]["price"]
+                perf_pct = ((current_price - start_price) / start_price) * 100 if start_price > 0 else 0.0
+            else:
+                perf_pct = 0.0
+            
+            last_pred = pd.read_sql_query("SELECT recommendation FROM predictions WHERE ticker = ? ORDER BY id DESC LIMIT 1", conn, params=(ticker,))
+            rec = last_pred.iloc[0]["recommendation"] if not last_pred.empty else "BEOBACHTUNG"
+            
+            # Score für Ranking (Performance + Signal-Gewichtung)
+            score = perf_pct + (15 if rec == "KAUFEN" else (-15 if rec == "VERKAUFEN" else 0))
+            rankings.append({"ticker": ticker, "Performance %": round(perf_pct, 2), "Score": score, "Letzte Empfehlung": rec})
 
-        selected_ticker = st.selectbox("Wähle eine Aktie für Details:", watchlist_df["ticker"].tolist())
+        rank_df = pd.DataFrame(rankings)
+        if not rank_df.empty:
+            # Absteigend nach Score sortieren (erfolgreichste Aktie zuerst)
+            rank_df = rank_df.sort_values(by="Score", ascending=False).reset_index(drop=True)
+            rank_df["Ranking"] = [f"#{i+1}" for i in range(len(rank_df))]
+            
+            merged_df = pd.merge(rank_df, watchlist_df, on="ticker")
+            merged_df["Status"] = merged_df["cycle_count"].apply(
+                lambda c: f"Prognose-Aktiv ({c}/{threshold})" if c >= threshold else f"Beobachtungsphase ({c}/{threshold})"
+            )
+            
+            # Ranking als ERSTE Spalte
+            display_cols = ["Ranking", "ticker", "Performance %", "Letzte Empfehlung", "cycle_count", "added_at", "Status"]
+            merged_df = merged_df[display_cols]
+            merged_df = merged_df.rename(columns={"ticker": "Ticker", "cycle_count": "Zyklus", "added_at": "Hinzugefügt am"})
+            
+            st.dataframe(merged_df, use_container_width=True)
+        else:
+            st.dataframe(watchlist_df, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("📈 Kurs-Visualisierung (Aufstieg & Fall)")
+        
+        selected_ticker = st.selectbox("Wähle eine Aktie für das Chart:", watchlist_df["ticker"].tolist())
         
         if selected_ticker:
-            st.subheader(f"Letzte Beobachtungen für {selected_ticker}")
             obs_df = pd.read_sql_query(
-                "SELECT timestamp, price, change_percent, news_titles, cycle_number FROM observations WHERE ticker = ? ORDER BY id DESC LIMIT 10",
+                "SELECT timestamp, price, change_percent, news_titles, cycle_number FROM observations WHERE ticker = ? ORDER BY id ASC",
                 conn, params=(selected_ticker,)
             )
-            st.dataframe(obs_df, use_container_width=True)
-
-            st.subheader(f"Generierte Signale & Prognosen für {selected_ticker}")
-            pred_df = pd.read_sql_query(
-                "SELECT timestamp, recommendation, short_term_10d, mid_term_100d, long_term_5y, rationale FROM predictions WHERE ticker = ? ORDER BY id DESC LIMIT 5",
-                conn, params=(selected_ticker,)
-            )
-            st.dataframe(pred_df, use_container_width=True)
+            if not obs_df.empty:
+                # Linien-Diagramm für Kursverlauf
+                chart_data = obs_df.set_index("timestamp")[["price"]]
+                chart_data = chart_data.rename(columns={"price": f"Kurs {selected_ticker} (USD)"})
+                st.line_chart(chart_data)
+                
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.subheader("Letzte Kurs-Beobachtungen")
+                    st.dataframe(obs_df.tail(10), use_container_width=True)
+                with col_b:
+                    st.subheader("Generierte Signale")
+                    pred_df = pd.read_sql_query(
+                        "SELECT timestamp, recommendation, short_term_10d, rationale FROM predictions WHERE ticker = ? ORDER BY id DESC LIMIT 5",
+                        conn, params=(selected_ticker,)
+                    )
+                    st.dataframe(pred_df, use_container_width=True)
     else:
         st.info("Noch keine Aktien auf der Watchlist. Füge unter 'Watchlist & Konfiguration' welche hinzu.")
     conn.close()
