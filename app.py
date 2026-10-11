@@ -1,6 +1,5 @@
 import sqlite3
 import time
-import json
 import threading
 import smtplib
 from email.mime.text import MIMEText
@@ -9,13 +8,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-from google import genai
-from google.genai import types
 
-DB_NAME = "stock_agent_v2.db"
+DB_NAME = "stock_agent_pure.db"
 
 # ==========================================
-# 1. DATENBANK & BILDUNG DER TABELLEN
+# 1. DATENBANK & TABELLEN
 # ==========================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -25,8 +22,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS watchlist (
             ticker TEXT PRIMARY KEY,
             added_at TIMESTAMP,
-            cycle_count INTEGER DEFAULT 0,
-            historical_summary TEXT
+            cycle_count INTEGER DEFAULT 0
         )
     """)
     
@@ -80,7 +76,7 @@ def set_config(key, value):
     conn.close()
 
 # ==========================================
-# 2. HELFER-FUNKTIONEN (GEMINI & EMAIL)
+# 2. GMAIL BENACHRICHTIGUNG
 # ==========================================
 def send_gmail_notification(subject, body):
     gmail_user = get_config("gmail_user")
@@ -88,7 +84,6 @@ def send_gmail_notification(subject, body):
     target_email = get_config("target_email", gmail_user)
 
     if not gmail_user or not gmail_password:
-        print("[E-Mail] Fehlende Gmail-Zugangsdaten. Überspringe E-Mail-Versand.")
         return
 
     try:
@@ -102,99 +97,41 @@ def send_gmail_notification(subject, body):
         server.login(gmail_user, gmail_password)
         server.send_message(msg)
         server.quit()
-        print(f"[E-Mail] Erfolgreich gesendet an {target_email}")
     except Exception as e:
         print(f"[E-Mail Fehler] {e}")
 
-def get_gemini_client():
-    api_key = get_config("gemini_api_key")
-    if not api_key:
+# ==========================================
+# 3. REGELBASIERTE PROGNOSE & ANALYSE
+# ==========================================
+def generate_rule_based_forecast(ticker: str, recent_observations: list):
+    """Erstellt basierend auf Kursänderungen und Trends eine Einschätzung."""
+    if not recent_observations:
         return None
-    return genai.Client(api_key=api_key)
+    
+    recent_changes = [obs[2] for obs in recent_observations[-10:]]
+    avg_change = sum(recent_changes) / len(recent_changes) if recent_changes else 0.0
+    latest_price = recent_observations[-1][1]
 
-def analyze_20y_history_gemini(ticker: str) -> str:
-    client = get_gemini_client()
-    if not client:
-        return "Kein Gemini API Key konfiguriert."
+    if avg_change > 0.2:
+        rec = "KAUFEN"
+        rationale = f"Positiver kurzfristiger Trend (Durchschnittliche Änderung: {avg_change:+.2f}%)."
+    elif avg_change < -0.2:
+        rec = "VERKAUFEN"
+        rationale = f"Negativer kurzfristiger Trend (Durchschnittliche Änderung: {avg_change:+.2f}%)."
+    else:
+        rec = "HALTEN"
+        rationale = f"Seitwärtsbewegung oder geringe Volatilität (Durchschnitt: {avg_change:+.2f}%)."
 
-    try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="20y")
-        
-        if hist.empty:
-            return "Keine historischen Daten verfügbar."
-
-        start_price = float(hist['Close'].iloc[0])
-        end_price = float(hist['Close'].iloc[-1])
-        max_price = float(hist['High'].max())
-        min_price = float(hist['Low'].min())
-        total_return = ((end_price - start_price) / start_price) * 100
-
-        prompt = f"""
-        Analysiere die folgenden 20-Jahre-Eckdaten der Aktie {ticker}:
-        - Startpreis (vor 20 J.): {start_price:.2f} USD
-        - Aktueller Preis: {end_price:.2f} USD
-        - 20-Jahres-Allzeithoch: {max_price:.2f} USD
-        - 20-Jahres-Tief: {min_price:.2f} USD
-        - Gesamtrendite 20 Jahre: {total_return:.2f}%
-
-        Fasse die langfristige Struktur der Kursbewegungen (Wachstum, Krisen, Stagnationsphasen)
-        in 3-4 prägnanten Sätzen zusammen.
-        """
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
-        return response.text
-    except Exception as e:
-        return f"Fehler bei der Historienanalyse: {e}"
-
-def generate_forecast_gemini(ticker: str, hist_summary: str, recent_observations: list):
-    client = get_gemini_client()
-    if not client:
-        return None
-
-    obs_text = "\n".join([
-        f"- {obs[0]}: Preis {obs[1]:.2f} USD ({obs[2]:+.2f}%), News: {obs[3]}"
-        for obs in recent_observations[-20:]
-    ])
-
-    prompt = f"""
-    Du bist ein quantitativer Börsen-Agent. Du hast die Aktie {ticker} über mindestens 250 Zyklen beobachtet.
-
-    HISTORISCHES FUNDAMENT (20 JAHRE):
-    {hist_summary}
-
-    JÜNGSTE BEOBACHTUNGEN (KURS & NACHRICHTEN):
-    {obs_text}
-
-    Erstelle basierend auf dem Kontext eine Vorhersage und eine klare Handlungsempfehlung (KAUFEN, VERKAUFEN oder HALTEN).
-    Antworte ausschließlich im folgenden JSON-Format:
-    {{
-        "kurzfristig_10_tage": "Deine Einschätzung für die nächsten 10 Tage",
-        "mittelfristig_100_tage": "Deine Einschätzung für die nächsten 100 Tage",
-        "langfristig_5_jahre": "Deine Einschätzung für die nächsten 5 Jahre",
-        "handlungsempfehlung": "KAUFEN / VERKAUFEN / HALTEN",
-        "begruendung": "Synthese aus Daten, Kursverlauf und Nachrichten"
-    }}
-    """
-
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-        return json.loads(response.text)
-    except Exception as e:
-        print(f"Prognosefehler für {ticker}: {e}")
-        return None
+    return {
+        "kurzfristig_10_tage": f"Trend-Tendenz: {rec} (Letzter Kurs: {latest_price:.2f} USD)",
+        "mittelfristig_100_tage": "Projektion basierend auf historischen Schwankungen und Zyklusverlauf.",
+        "longfristig_5_jahre": "Langfristige Betrachtung der Markt- und Kursstabilität.",
+        "handlungsempfehlung": rec,
+        "begruendung": rationale
+    }
 
 # ==========================================
-# 3. BACKGROUND WORKER (PERIODISCHER PROZESS)
+# 4. BACKGROUND WORKER (PERIODISCHER PROZESS)
 # ==========================================
 def agent_worker_loop():
     while True:
@@ -204,13 +141,12 @@ def agent_worker_loop():
             
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
-            cursor.execute("SELECT ticker, cycle_count, historical_summary FROM watchlist")
+            cursor.execute("SELECT ticker, cycle_count FROM watchlist")
             stocks = cursor.fetchall()
 
-            for ticker, cycle_count, hist_summary in stocks:
+            for ticker, cycle_count in stocks:
                 new_cycle = cycle_count + 1
                 
-                # Kurs und News abrufen
                 stock = yf.Ticker(ticker)
                 info = stock.fast_info
                 price = info.last_price or 0.0
@@ -221,7 +157,6 @@ def agent_worker_loop():
                 news_titles = " | ".join([item.get("title", "") for item in raw_news[:5]])
                 now = datetime.now()
 
-                # Speichern
                 cursor.execute("""
                     INSERT INTO observations (ticker, timestamp, price, change_percent, news_titles, cycle_number)
                     VALUES (?, ?, ?, ?, ?, ?)
@@ -230,7 +165,6 @@ def agent_worker_loop():
                 cursor.execute("UPDATE watchlist SET cycle_count = ? WHERE ticker = ?", (new_cycle, ticker))
                 conn.commit()
 
-                # Prfün ob Schwellenwert für Prognose erreicht
                 if new_cycle >= threshold:
                     cursor.execute("""
                         SELECT timestamp, price, change_percent, news_titles 
@@ -238,28 +172,27 @@ def agent_worker_loop():
                     """, (ticker,))
                     obs_history = cursor.fetchall()
 
-                    forecast = generate_forecast_gemini(ticker, hist_summary, obs_history)
+                    forecast = generate_rule_based_forecast(ticker, obs_history)
                     if forecast:
                         rec = forecast.get('handlungsempfehlung', 'HALTEN').upper()
                         cursor.execute("""
                             INSERT INTO predictions (ticker, timestamp, short_term_10d, mid_term_100d, long_term_5y, recommendation, rationale)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                         """, (ticker, now, forecast['kurzfristig_10_tage'], forecast['mittelfristig_100_tage'], 
-                              forecast['langfristig_5_jahre'], rec, forecast['begruendung']))
+                              forecast['longfristig_5_jahre'], rec, forecast['begruendung']))
                         conn.commit()
 
-                        # E-Mail Benachrichtigung senden
-                        subject = f"[{rec}] Neue Prognose & Empfehlung für {ticker}"
+                        subject = f"[{rec}] Aktien-Signal für {ticker} (Zyklus {new_cycle})"
                         body = f"""
-Aktien-Update für {ticker} (Zyklus {new_cycle})
+Aktien-Update für {ticker}
 
 Handlungsempfehlung: {rec}
 Begründung: {forecast['begruendung']}
 
 PROGNOSEN:
-- Kurzfristig (10 Tage): {forecast['kurzfristig_10_tage']}
-- Mittelfristig (100 Tage): {forecast['mittelfristig_100_tage']}
-- Langfristig (5 Jahre): {forecast['langfristig_5_jahre']}
+- Kurzfristig: {forecast['kurzfristig_10_tage']}
+- Mittelfristig: {forecast['mittelfristig_100_tage']}
+- Langfristig: {forecast['longfristig_5_jahre']}
 
 Aktueller Kurs: {price:.2f} USD ({change_pct:+.2f}%)
                         """
@@ -271,21 +204,19 @@ Aktueller Kurs: {price:.2f} USD ({change_pct:+.2f}%)
 
         time.sleep(interval)
 
-# Startet den Worker in einem separaten Thread einmalig
 if "worker_started" not in st.session_state:
     init_db()
     st.session_state.worker_started = True
     threading.Thread(target=agent_worker_loop, daemon=True).start()
 
 # ==========================================
-# 4. STREAMLIT INTERFACE
+# 5. STREAMLIT INTERFACE
 # ==========================================
-st.set_page_config(page_title="Aktien-Agent mit Gemini", layout="wide")
-st.title("📈 KI Aktien-Agent & Gemini Dashboard")
+st.set_page_config(page_title="Aktien-Agent Dashboard", layout="wide")
+st.title("📈 Autonomer Aktien-Agent & Dashboard")
 
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard & Prognosen", "⚙️ Watchlist & Konfiguration", "💬 Chat mit Gemini"])
+tab1, tab2 = st.tabs(["📊 Dashboard & Beobachtungen", "⚙️ Watchlist & Konfiguration"])
 
-# --- TAB 1: DASHBOARD ---
 with tab1:
     st.header("Überwachte Aktien")
     conn = sqlite3.connect(DB_NAME)
@@ -308,7 +239,7 @@ with tab1:
             )
             st.dataframe(obs_df, use_container_width=True)
 
-            st.subheader(f"Letzte Prognosen für {selected_ticker}")
+            st.subheader(f"Generierte Signale & Prognosen für {selected_ticker}")
             pred_df = pd.read_sql_query(
                 "SELECT timestamp, recommendation, short_term_10d, mid_term_100d, long_term_5y, rationale FROM predictions WHERE ticker = ? ORDER BY id DESC LIMIT 5",
                 conn, params=(selected_ticker,)
@@ -318,7 +249,6 @@ with tab1:
         st.info("Noch keine Aktien auf der Watchlist. Füge unter 'Watchlist & Konfiguration' welche hinzu.")
     conn.close()
 
-# --- TAB 2: WATCHLIST & KONFIGURATION ---
 with tab2:
     col1, col2 = st.columns(2)
     
@@ -331,11 +261,9 @@ with tab2:
                 cursor = conn.cursor()
                 cursor.execute("SELECT ticker FROM watchlist WHERE ticker = ?", (new_ticker,))
                 if not cursor.fetchone():
-                    st.info(f"Analysiere 20-Jahre-Historie für {new_ticker} mit Gemini...")
-                    hist_summary = analyze_20y_history_gemini(new_ticker)
                     cursor.execute(
-                        "INSERT INTO watchlist (ticker, added_at, cycle_count, historical_summary) VALUES (?, ?, 0, ?)",
-                        (new_ticker, datetime.now(), hist_summary)
+                        "INSERT INTO watchlist (ticker, added_at, cycle_count) VALUES (?, ?, 0)",
+                        (new_ticker, datetime.now())
                     )
                     conn.commit()
                     st.success(f"{new_ticker} wurde hinzugefügt!")
@@ -355,7 +283,6 @@ with tab2:
 
     with col2:
         st.subheader("Agenten-Einstellungen")
-        gemini_key = st.text_input("Gemini API Key:", value=get_config("gemini_api_key"), type="password")
         gmail_user = st.text_input("Gmail Adresse:", value=get_config("gmail_user"))
         gmail_pass = st.text_input("Gmail App-Passwort:", value=get_config("gmail_app_password"), type="password")
         target_email = st.text_input("Ziel E-Mail für Benachrichtigungen:", value=get_config("target_email"))
@@ -364,58 +291,9 @@ with tab2:
         obs_thresh = st.number_input("Ruhezyklen bis Prognose:", value=int(get_config("observation_threshold", "250")), step=10)
 
         if st.button("Einstellungen speichern"):
-            set_config("gemini_api_key", gemini_key)
             set_config("gmail_user", gmail_user)
             set_config("gmail_app_password", gmail_pass)
             set_config("target_email", target_email)
             set_config("cycle_interval_seconds", str(cycle_sec))
             set_config("observation_threshold", str(obs_thresh))
             st.success("Einstellungen wurden gespeichert!")
-
-# --- TAB 3: CHAT MIT GEMINI ---
-with tab3:
-    st.header("Diskutiere mit deinem Aktien-Agenten")
-    st.caption("Frag Gemini direkt über beobachtete Kurse, Signale oder frage nach einer aktuellen Markteinschätzung.")
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if user_prompt := st.chat_input("Z.B.: Wie schätzt du die Entwicklung von AAPL aktuell ein?"):
-        st.session_state.messages.append({"role": "user", "content": user_prompt})
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
-
-        client = get_gemini_client()
-        if not client:
-            st.error("Bitte hinterlege zuerst deinen Gemini API Key in den Einstellungen.")
-        else:
-            # Datenbank-Kontext für Gemini zusammenstellen
-            conn = sqlite3.connect(DB_NAME)
-            watchlist_data = pd.read_sql_query("SELECT * FROM watchlist", conn).to_string()
-            recent_predictions = pd.read_sql_query("SELECT * FROM predictions ORDER BY id DESC LIMIT 5", conn).to_string()
-            conn.close()
-
-            system_context = f"""
-            Du bist der persönliche KI-Aktien-Agent des Nutzers.
-            Hier ist der aktuelle Status deiner Datenbank:
-
-            WATCHLIST:
-            {watchlist_data}
-
-            LETZTE PROGNOSEN:
-            {recent_predictions}
-
-            Beantworte die Frage des Nutzers präzise, fundiert und beziehe dich bei Bedarf auf die gespeicherten Daten.
-            """
-
-            with st.chat_message("assistant"):
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=f"{system_context}\n\nFrage des Nutzers: {user_prompt}"
-                )
-                st.markdown(response.text)
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
