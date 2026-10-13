@@ -11,6 +11,11 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+# ==========================================
+# 0. STREAMLIT SEITEN-KONFIGURATION (MUSS ALS ERSTES STEHEN)
+# ==========================================
+st.set_page_config(page_title="Autonomer Aktien-Agent & Dashboard", layout="wide")
+
 DB_NAME = "stock_agent_advanced.db"
 
 # ==========================================
@@ -20,7 +25,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Watchlist mit persistenter ID und exaktem Namen
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +34,6 @@ def init_db():
         )
     """)
     
-    # Historische Beobachtungen (echte Kurse)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +44,6 @@ def init_db():
         )
     """)
     
-    # Prognosen und historische Vergleiche zum Lernen
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +57,6 @@ def init_db():
         )
     """)
     
-    # News-Cache für Tagesschau & ZDFheute
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS news_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,7 +72,6 @@ def init_db():
 # 2. DATENABRUF (BÖRSE FRANKFURT & NEWS)
 # ==========================================
 def fetch_boerse_frankfurt_data(ticker: str):
-    """Holt exakten Namen und Kurs von Börse Frankfurt bzw. yfinance."""
     try:
         stock = yf.Ticker(ticker)
         info = stock.fast_info
@@ -79,14 +79,12 @@ def fetch_boerse_frankfurt_data(ticker: str):
         prev_close = info.previous_close or price
         change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
         
-        # Name ermitteln
         name = stock.info.get('longName', ticker)
         return name, price, change_pct
     except Exception:
         return ticker, 0.0, 0.0
 
 def fetch_news_feeds() -> str:
-    """Holt aktuelle Nachrichten von Tagesschau und ZDFheute."""
     news_items = []
     feeds = [
         ("Tagesschau", "https://www.tagesschau.de/xml/rss2"),
@@ -109,7 +107,7 @@ def fetch_news_feeds() -> str:
     return " || ".join(news_items) if news_items else "Keine aktuellen Nachrichten verfügbar."
 
 # ==========================================
-# 3. GMAIL BENACHRICHTIGUNG (FESTE CREDENTIALS)
+# 3. GMAIL BENACHRICHTIGUNG
 # ==========================================
 def send_alert_email(subject, body):
     sender = "aag474736@gmail.com"
@@ -134,14 +132,13 @@ def send_alert_email(subject, body):
 # 4. AUTONOMER KI-LERN- & PROGNOSE-AGENT
 # ==========================================
 def calculate_accuracy(ticker: str) -> float:
-    """Berechnet die Akkuratheit basierend auf vergangenen Prognosen vs. Realwerten."""
     conn = sqlite3.connect(DB_NAME)
     pred_df = pd.read_sql_query("SELECT timestamp, predicted_price FROM predictions WHERE ticker = ? ORDER BY timestamp DESC LIMIT 20", conn, params=(ticker,))
     obs_df = pd.read_sql_query("SELECT timestamp, price FROM observations WHERE ticker = ? ORDER BY timestamp DESC LIMIT 20", conn, params=(ticker,))
     conn.close()
     
     if pred_df.empty or obs_df.empty:
-        return 95.4  # Startwert
+        return 95.4
         
     diffs = []
     for _, pred in pred_df.iterrows():
@@ -157,7 +154,6 @@ def calculate_accuracy(ticker: str) -> float:
     return round(min(99.9, max(85.0, accuracy)), 2)
 
 def generate_ai_forecast(ticker: str, current_price: float, horizon: str, news_context: str):
-    """Erstellt Prognosen und passt sich durch kontinuierliches Lernen an."""
     multiplier = 1.01 if "Kauf" in news_context or "Wachstum" in news_context else 0.99
     if "Folge-Jahrzehnt" in horizon:
         predicted_price = current_price * (multiplier ** 10) * 1.35
@@ -181,7 +177,7 @@ def generate_ai_forecast(ticker: str, current_price: float, horizon: str, news_c
     return predicted_price, rec, rationale
 
 # ==========================================
-# 5. BACKGROUND WORKER (LÄUFT KONTINUIERLICH)
+# 5. BACKGROUND WORKER
 # ==========================================
 def background_agent_loop():
     while True:
@@ -202,7 +198,7 @@ def background_agent_loop():
                     VALUES (?, ?, ?, ?)
                 """, (ticker, now, price, change_pct))
                 
-                horizons = ["Zum Folge-Tag", "Zur Folge-Woche", "Zum Folge-Monat", "Zum Folge-Jahr", "Zum Folge-Jahrzehnt"]
+                horizons = ["Zum Folge-Tag", "Zur Folge-Woche", "Zum Folge-Monat", "Zur Folge-Jahr", "Zur Folge-Jahrzehnt"]
                 for h in horizons:
                     pred_price, rec, rat = generate_ai_forecast(ticker, price, h, news)
                     
@@ -235,7 +231,6 @@ if "worker_running" not in st.session_state:
 # ==========================================
 # 6. STREAMLIT BENUTZEROBERFLÄCHE
 # ==========================================
-st.set_page_config(page_title="Autonomer Aktien-Agent & Dashboard", layout="wide")
 st.title("📈 Autonomer Aktien-Agent (live.deutsche-boerse.com)")
 
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard & Watchlist", "🔍 Details & Graphen", "⚙️ Verwaltung"])
@@ -252,7 +247,7 @@ with tab1:
     with col_opt2:
         prog_choice = st.selectbox(
             "Performance-Prognose Zeitraum (Spaltenkopf):",
-            ["Zum Folge-Tag", "Zur Folge-Woche", "Zum Folge-Monat", "Zum Folge-Jahr", "Zum Folge-Jahrzehnt"]
+            ["Zum Folge-Tag", "Zur Folge-Woche", "Zur Folge-Monat", "Zur Folge-Jahr", "Zur Folge-Jahrzehnt"]
         )
         
     conn = sqlite3.connect(DB_NAME)
