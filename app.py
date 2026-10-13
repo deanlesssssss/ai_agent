@@ -41,7 +41,7 @@ def init_db():
         )
     """)
     
-    # Prognosen und historische Vergleiche zum Lernen (Akuratheit)
+    # Prognosen und historische Vergleiche zum Lernen
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,11 +143,9 @@ def calculate_accuracy(ticker: str) -> float:
     if pred_df.empty or obs_df.empty:
         return 95.4  # Startwert
         
-    # Lern-Algorithmus: Annäherung an tatsächliche Werte
     diffs = []
     for _, pred in pred_df.iterrows():
-        # Finde passenden Realwert
-        match = obs_df.iloc[0]["price"] # vereinfachter Abgleich
+        match = obs_df.iloc[0]["price"]
         pred_val = pred["predicted_price"]
         if match > 0:
             error = abs(pred_val - match) / match
@@ -158,9 +156,8 @@ def calculate_accuracy(ticker: str) -> float:
     accuracy = (sum(diffs) / len(diffs)) * 100
     return round(min(99.9, max(85.0, accuracy)), 2)
 
-def generate_ai_forecast(ticker: str, current_price: int, horizon: str, news_context: str):
+def generate_ai_forecast(ticker: str, current_price: float, horizon: str, news_context: str):
     """Erstellt Prognosen und passt sich durch kontinuierliches Lernen an."""
-    # Simulation des Lernprozesses und Einbeziehung von Weltgeschehen
     multiplier = 1.01 if "Kauf" in news_context or "Wachstum" in news_context else 0.99
     if "Folge-Jahrzehnt" in horizon:
         predicted_price = current_price * (multiplier ** 10) * 1.35
@@ -200,18 +197,15 @@ def background_agent_loop():
             for ticker in tickers:
                 name, price, change_pct = fetch_boerse_frankfurt_data(ticker)
                 
-                # Beobachtung speichern
                 cursor.execute("""
                     INSERT INTO observations (ticker, timestamp, price, change_percent)
                     VALUES (?, ?, ?, ?)
                 """, (ticker, now, price, change_pct))
                 
-                # Prognosen für verschiedene Horizonte generieren
                 horizons = ["Zum Folge-Tag", "Zur Folge-Woche", "Zum Folge-Monat", "Zum Folge-Jahr", "Zum Folge-Jahrzehnt"]
                 for h in horizons:
                     pred_price, rec, rat = generate_ai_forecast(ticker, price, h, news)
                     
-                    # Letzten Status prüfen für E-Mail-Alarm bei Statusänderung
                     cursor.execute("SELECT recommendation FROM predictions WHERE ticker = ? AND horizon = ? ORDER BY id DESC LIMIT 1", (ticker, h))
                     last_rec = cursor.fetchone()
                     
@@ -220,7 +214,6 @@ def background_agent_loop():
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (ticker, now, h, pred_price, rec, rat, news))
                     
-                    # Alarm prüfen
                     if last_rec and last_rec[0] != rec:
                         send_alert_email(
                             f"Statusänderung Alarm: {name} ({ticker}) ist jetzt '{rec}'",
@@ -232,7 +225,7 @@ def background_agent_loop():
         except Exception as e:
             print(f"[Worker Error] {e}")
             
-        time.sleep(300) # alle 5 Minuten
+        time.sleep(300)
 
 if "worker_running" not in st.session_state:
     init_db()
@@ -245,13 +238,11 @@ if "worker_running" not in st.session_state:
 st.set_page_config(page_title="Autonomer Aktien-Agent & Dashboard", layout="wide")
 st.title("📈 Autonomer Aktien-Agent (live.deutsche-boerse.com)")
 
-# Navigation Tabs oder Abschnitte
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard & Watchlist", "🔍 Details & Graphen", "⚙️ Verwaltung"])
 
 with tab1:
     st.header("Überwachte Aktien")
     
-    # Dropdown-Auswahl in Spaltenköpfen (simuliert über Streamlit Selectboxen oberhalb der Tabelle)
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
         perf_choice = st.selectbox(
@@ -261,7 +252,7 @@ with tab1:
     with col_opt2:
         prog_choice = st.selectbox(
             "Performance-Prognose Zeitraum (Spaltenkopf):",
-            ["Zum Folge-Tag", "Zur Folge-Woche", "Zur Folge-Monat", "Zur Folge-Jahr", "Zur Folge-Jahrzehnt"]
+            ["Zum Folge-Tag", "Zur Folge-Woche", "Zum Folge-Monat", "Zum Folge-Jahr", "Zum Folge-Jahrzehnt"]
         )
         
     conn = sqlite3.connect(DB_NAME)
@@ -275,10 +266,8 @@ with tab1:
             name = row["name"] or ticker
             added_at_str = pd.to_datetime(row["added_at"]).strftime("%d.%m.%Y | %H:%M") if row["added_at"] else "-"
             
-            # Aktueller Preis & Performance holen
             _, current_price, change_pct = fetch_boerse_frankfurt_data(ticker)
             
-            # Performance-Prognose für gewähltes Intervall holen
             pred_row = pd.read_sql_query(
                 "SELECT predicted_price, recommendation FROM predictions WHERE ticker = ? AND horizon = ? ORDER BY id DESC LIMIT 1",
                 conn, params=(ticker, prog_choice)
@@ -298,7 +287,7 @@ with tab1:
             table_data.append({
                 "ID": f"#{stock_id}",
                 "Hinzugefügt am": added_at_str,
-                "Ranking_Score": pred_change, # zum Sortieren
+                "Ranking_Score": pred_change,
                 "Aktie": name,
                 "Performance": perf_str,
                 "Performance-Prognose": pred_str,
@@ -307,7 +296,6 @@ with tab1:
             
         t_df = pd.DataFrame(table_data)
         if not t_df.empty:
-            # Sortierung nach Ranking (Höchste Performance-Prognose = Platz 1)
             t_df = t_df.sort_values(by="Ranking_Score", ascending=False).reset_index(drop=True)
             t_df.insert(2, "Ranking", [f"#{i+1}" for i in range(len(t_df))])
             t_df = t_df.drop(columns=["Ranking_Score"])
@@ -327,21 +315,17 @@ with tab2:
         selected_label = st.selectbox("Wähle Aktie für Detail-Ansicht:", list(stock_options.keys()))
         selected_ticker = stock_options[selected_label]
         
-        # Graphen & NOW-Linie
         st.subheader(f"Kurs- & Prognoseverlauf für {selected_label}")
         
         obs_df = pd.read_sql_query("SELECT timestamp, price FROM observations WHERE ticker = ? ORDER BY timestamp ASC", conn, params=(selected_ticker,))
-        pred_df = pd.read_sql_query("SELECT timestamp, predicted_price FROM predictions WHERE ticker = ? ORDER BY timestamp ASC", conn, params=(selected_ticker,))
         
         if not obs_df.empty:
             chart_data = obs_df.set_index("timestamp")[["price"]].rename(columns={"price": "Tatsächlicher Kurs (€)"})
             st.line_chart(chart_data)
             
-            # Akkuratheit
             accuracy = calculate_accuracy(selected_ticker)
             st.markdown(f"### Akkuratheit der Prognosen bis NOW: **{accuracy}%**")
             
-            # Letzte Empfehlung & Begründung
             last_pred = pd.read_sql_query("SELECT recommendation, rationale, news_sources FROM predictions WHERE ticker = ? ORDER BY id DESC LIMIT 1", conn, params=(selected_ticker,))
             if not last_pred.empty:
                 rec = last_pred.iloc[0]["recommendation"]
@@ -366,7 +350,7 @@ with tab3:
         new_ticker = st.text_input("Ticker-Symbol eingeben (z.B. AAPL, TSLA, BMW.DE):").upper().strip()
         if st.button("Hinzufügen"):
             if new_ticker:
-                name, _, _ = fetch_deutsche_boerse_data(new_ticker)
+                name, _, _ = fetch_boerse_frankfurt_data(new_ticker)
                 conn = sqlite3.connect(DB_NAME)
                 cursor = conn.cursor()
                 try:
