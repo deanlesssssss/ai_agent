@@ -12,7 +12,7 @@ import streamlit as st
 import yfinance as yf
 
 # ==========================================
-# 0. STREAMLIT SEITEN-KONFIGURATION (MUSS ALS ERSTES STEHEN)
+# 0. STREAMLIT SEITEN-KONFIGURATION
 # ==========================================
 st.set_page_config(page_title="Autonomer Aktien-Agent & Dashboard", layout="wide")
 
@@ -67,6 +67,9 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+# Sofortige Ausführung beim Start, damit Tabellen existieren
+init_db()
 
 # ==========================================
 # 2. DATENABRUF (BÖRSE FRANKFURT & NEWS)
@@ -198,7 +201,7 @@ def background_agent_loop():
                     VALUES (?, ?, ?, ?)
                 """, (ticker, now, price, change_pct))
                 
-                horizons = ["Zum Folge-Tag", "Zur Folge-Woche", "Zum Folge-Monat", "Zur Folge-Jahr", "Zur Folge-Jahrzehnt"]
+                horizons = ["Zum Folge-Tag", "Zur Folge-Woche", "Zur Folge-Monat", "Zur Folge-Jahr", "Zur Folge-Jahrzehnt"]
                 for h in horizons:
                     pred_price, rec, rat = generate_ai_forecast(ticker, price, h, news)
                     
@@ -224,7 +227,6 @@ def background_agent_loop():
         time.sleep(300)
 
 if "worker_running" not in st.session_state:
-    init_db()
     st.session_state.worker_running = True
     threading.Thread(target=background_agent_loop, daemon=True).start()
 
