@@ -60,7 +60,7 @@ def init_db():
         conn.commit()
         conn.close()
     except Exception as e:
-        st.error(لf"Datenbank-Fehler: {e}")
+        st.error(f"Datenbank-Fehler: {e}")
 
 init_db()
 
@@ -72,21 +72,18 @@ def fetch_boerse_frankfurt_data(ticker: str):
     try:
         import yfinance as yf
         stock = yf.Ticker(ticker)
-        # Schneller Versuch über fast_info
         info = stock.fast_info
         price = float(info.last_price or 100.0)
         prev_close = float(info.previous_close or price)
         change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
         
-        # Name sicher auslesen
         try:
             name = stock.info.get('longName', ticker)
         except Exception:
             name = ticker
             
         return name, price, change_pct
-    except Exception as e:
-        # Fallback-Werte, damit die App nicht abstürzt, falls Yahoo blockiert
+    except Exception:
         return ticker, 100.0, 0.5
 
 def fetch_news_feeds() -> str:
@@ -380,6 +377,5 @@ try:
                     st.success(f"{t_rem} wurde von der Watchlist entfernt (ID bleibt erhalten).")
 
 except Exception as e:
-    # Das fängt jeden unvorhergesehenen Fehler ab und zeigt ihn im Klartext an
     st.error("Ein unerwarteter Fehler ist aufgetreten:")
     st.code(traceback.format_exc())
